@@ -145,33 +145,58 @@ func TestFeed(t *testing.T) {
 	var dur time.Duration
 	var wg sync.WaitGroup
 
-	durRead := 0 * time.Second
+	byteSent := 0
 	byteRead := 0
 
 	interval := 40 * time.Millisecond //1/25 of a second
 	cc := NewTimedContentConsumer("client1", interval, 2)
 	var lastTime time.Time
-	lastTime = time.Now()
+	downstream := make(chan interface{}, 10)
+	eventstream := make(chan ConsumerEventPtr, 10)
+	cc.Downstream = downstream
+	cc.EventDownstream = eventstream
+	go cc.Run(&wg)
 
-	cc.BelowMinLevelFunc = func() {
-		t.Logf("Below Min Level")
-	}
-	cc.PostDataFunc = func(dur time.Duration, data interface{}) {
-		timeNow := time.Now()
-		diff := timeNow.Sub(lastTime)
-		t.Logf("Read Dur:%v Bytes:%v Diff:%v", dur, data, diff)
-		durRead += dur
-		if data != nil {
-			byteRead += len(data.([]byte))
+	go func(wg *sync.WaitGroup) {
+		wg.Add(1)
+		defer wg.Done()
+		lastTime = time.Now()
+		for downstream != nil && eventstream != nil {
+			select {
+			case data, ok := <-downstream:
+				if !ok {
+					downstream = nil
+					continue
+				}
+				if data != nil {
+					bytes := data.([]byte)
+					timeNow := time.Now()
+					diff := timeNow.Sub(lastTime)
+					t.Logf("Read Bytes:%v Diff:%v", bytes, diff)
+					if data != nil {
+						byteRead += len(data.([]byte))
+					}
+					lastTime = timeNow
+				}
+			case err, ok := <-eventstream:
+				if !ok {
+					eventstream = nil
+					continue
+				}
+				if err != nil {
+					t.Logf("%v", err)
+				}
+			}
+
 		}
-		lastTime = timeNow
-	}
+	}(&wg)
 	c := cc.Channel()
 	data := []byte("ABCDEF")
-	go cc.Run(&wg)
+
 	for i := 0; i < 5; i++ {
 		dur = 2 * time.Second
 		c <- NewTimedContent(dur, data)
+		byteSent += len(data)
 		t.Logf("Write Dur:%v Bytes:%v", dur, data)
 		time.Sleep(40 * time.Millisecond)
 	}
@@ -185,9 +210,9 @@ func TestFeed(t *testing.T) {
 	if cc.Channel() != nil {
 		t.Errorf("Closed channel returning not null")
 	}
-	if durRead != 10*time.Second {
-		t.Errorf("Content Read failed : Exp %v, Act:%v", 10*time.Second, durRead)
+	if byteRead != byteSent {
+		t.Errorf("Content Read failed : Exp %v, Act:%v", byteSent, byteRead)
 		return
 	}
-	t.Logf("Dur Read : %v, Bytes Read : %v", durRead, byteRead)
+	t.Logf("Bytes Read : %v", byteRead)
 }

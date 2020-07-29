@@ -4,6 +4,7 @@ package contentconsumer
 import (
 	"container/ring"
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
 	"sync"
@@ -29,6 +30,12 @@ func NewTimedContent(duration time.Duration, data interface{}) TimedContentPtr {
 	return ret
 }
 
+//ErrConsumerDrainedEmpty - Empty Consumer Buffer
+var ErrConsumerDrainedEmpty error = errors.New("EmptyBuffer")
+
+// ErrConsumerChannelClosed - AddChunk to closed channel
+var ErrConsumerChannelClosed error = errors.New("ChannelClosed")
+
 //TimedContentConsumer -
 //   * Maintains a Cache of given ConsumptionInterval
 //       * Channel may have more
@@ -45,10 +52,10 @@ type TimedContentConsumer struct {
 	//Interval to drain buffer for content worth the interval
 	ConsumptionInterval time.Duration
 
-	//Hook for handling data drained
-	PostDataFunc func(time.Duration, interface{})
-	//Hook for handling BelowMinLevel
-	BelowMinLevelFunc func()
+	//downstream Consumer of content drained
+	Downstream chan<- interface{}
+	//downstream Consumer of events
+	EventDownstream chan<- ConsumerEventPtr
 
 	//INTERNAL:
 
@@ -97,6 +104,9 @@ func NewTimedContentConsumer(id string, interval time.Duration, slots int) *Time
 	ret.reader = ret.buffer.Prev() //Last Read location.  Next() and Read()
 
 	ret.ConsumptionInterval = interval
+
+	ret.Downstream = nil
+	ret.EventDownstream = nil
 	return ret
 }
 
@@ -128,7 +138,7 @@ func (cc *TimedContentConsumer) addChunk(c TimedContentPtr) error {
 	cc.buffersLock.Lock()
 	defer cc.buffersLock.Unlock()
 	if c == nil || c.data == nil {
-		return fmt.Errorf("Cannot add nil data")
+		return ErrConsumerChannelClosed
 	}
 	//If current writer position is not empty
 	//and reader is just behind to read
@@ -166,7 +176,8 @@ func (cc *TimedContentConsumer) consumeChunks(elapsed time.Duration) (time.Durat
 	for {
 		if cc.reader.Next() == cc.writer {
 			//Nothing to read
-			return elapsed, fmt.Errorf("Not Enough drain. Under by %v", elapsed)
+			//log.Printf("Noting READ... ")
+			return elapsed, ErrConsumerDrainedEmpty
 		}
 		//Step forward for reading
 		cc.reader = cc.reader.Next()
@@ -185,8 +196,9 @@ func (cc *TimedContentConsumer) consumeChunks(elapsed time.Duration) (time.Durat
 			cc.reader.Value = nil
 			elapsed = elapsed - chunk.duration
 			cc.bufferAvailPeriod -= chunk.duration
-			if cc.PostDataFunc != nil {
-				go cc.PostDataFunc(chunk.duration, chunk.data)
+			if cc.Downstream != nil {
+				cc.Downstream <- chunk.data
+				//log.Printf("SENT %v %v", chunk.data, chunk.duration)
 			}
 			continue //next chunk also required
 		} else if chunk.duration == elapsed {
@@ -194,8 +206,9 @@ func (cc *TimedContentConsumer) consumeChunks(elapsed time.Duration) (time.Durat
 			cc.reader.Value = nil
 			cc.bufferAvailPeriod -= chunk.duration
 			elapsed = 0
-			if cc.PostDataFunc != nil {
-				go cc.PostDataFunc(chunk.duration, chunk.data)
+			if cc.Downstream != nil {
+				cc.Downstream <- chunk.data
+				//log.Printf("SENT %v %v", chunk.data, chunk.duration)
 			}
 			break //All data read fully... exit
 		} else {
@@ -217,6 +230,19 @@ func (cc *TimedContentConsumer) DrainChunks(ctx context.Context, wg *sync.WaitGr
 		wg.Add(1)
 		defer wg.Done()
 	}
+	defer func() {
+		if cc.Downstream != nil {
+			close(cc.Downstream)
+			cc.Downstream = nil
+			//log.Printf("Closed Downstream")
+		}
+		if cc.EventDownstream != nil {
+			close(cc.EventDownstream)
+			cc.EventDownstream = nil
+			//log.Printf("Closed EventDownstream")
+		}
+	}()
+
 	var remain time.Duration
 	var err error
 	for {
@@ -234,8 +260,9 @@ func (cc *TimedContentConsumer) DrainChunks(ctx context.Context, wg *sync.WaitGr
 			cc.lastTimeEval = curTime
 			remain, err = cc.consumeChunks(elapsed)
 			if err != nil {
-				if cc.BelowMinLevelFunc != nil {
-					go cc.BelowMinLevelFunc()
+				if cc.EventDownstream != nil {
+					cc.EventDownstream <- &ConsumerEvent{time.Now(), cc.ID, fmt.Errorf("Elapsed %v: %w", remain, err)}
+					//log.Printf("ERR SENT %v %v %v", cc.ID, remain, err)
 				}
 			}
 			runtime.Gosched()
