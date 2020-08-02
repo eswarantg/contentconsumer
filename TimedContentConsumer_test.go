@@ -155,11 +155,19 @@ func TestFeed(t *testing.T) {
 	eventstream := make(chan ConsumerEventPtr, 10)
 	cc.Downstream = downstream
 	cc.EventDownstream = eventstream
+	wg.Add(1)
 	go cc.Run(&wg)
-
+	wg.Add(1)
 	go func(wg *sync.WaitGroup) {
-		wg.Add(1)
-		defer wg.Done()
+		var cleanup func()
+		if wg != nil {
+			cleanup = func() {
+				wg.Done()
+			}
+		} else {
+			cleanup = func() {}
+		}
+		defer cleanup()
 		lastTime = time.Now()
 		for downstream != nil && eventstream != nil {
 			select {
