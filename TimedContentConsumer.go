@@ -272,15 +272,9 @@ func (cc *TimedContentConsumer) DrainChunks(ctx context.Context, wg *sync.WaitGr
 
 //Run - Start Consuming Content
 func (cc *TimedContentConsumer) Run(wg *sync.WaitGroup) {
-	var cleanup func()
 	if wg != nil {
-		cleanup = func() {
-			wg.Done()
-		}
-	} else {
-		cleanup = func() {}
+		defer wg.Done()
 	}
-	defer cleanup()
 	//Create a cancellable concext for all related stuff to stop at end of this
 	ctx, cancelfunc := context.WithCancel(context.Background())
 	defer cancelfunc()
